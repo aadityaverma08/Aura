@@ -8,7 +8,9 @@
   --color-secondary-accent: #c084fc;
   --color-border: #27272a;
   
-  --font-family: var(--font-outfit), system-ui, sans-serif;
+  --font-header: var(--font-cinzel), serif;
+  --font-body: var(--font-urbanist), sans-serif;
+  
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
@@ -29,10 +31,18 @@ html, body {
 body {
   background-color: var(--color-bg);
   color: var(--color-text);
-  font-family: var(--font-family);
+  font-family: var(--font-body);
   position: relative;
   overflow-x: hidden;
-  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-header);
+  letter-spacing: 0.05em;
+  font-weight: 700;
 }
 
 /* Starry background effect */

@@ -1,9 +1,15 @@
 import type { Metadata } from "next";
-import { Outfit } from "next/font/google";
+import { Cinzel_Decorative, Urbanist } from "next/font/google";
 import "./globals.css";
 
-const outfit = Outfit({
-  variable: "--font-outfit",
+const cinzel = Cinzel_Decorative({
+  variable: "--font-cinzel",
+  subsets: ["latin"],
+  weight: ["400", "700"],
+});
+
+const urbanist = Urbanist({
+  variable: "--font-urbanist",
   subsets: ["latin"],
 });
 
@@ -18,7 +24,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={outfit.variable}>
+    <html lang="en" className={`${cinzel.variable} ${urbanist.variable}`}>
       <body>
         <div className="container">
           {children}
