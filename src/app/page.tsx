@@ -57,17 +57,85 @@ function getMoonPhase() {
 }
 
 // ── Shared UI ─────────────────────────────────────────────────────────────────
-const AstroLoader = ({ msg = "Consulting the Cosmos..." }: { msg?: string }) => (
-  <div style={{ padding: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
-    <div className="astro-loader-container">
-      <div className="astro-ring ring-1"></div>
-      <div className="astro-ring ring-2"></div>
-      <div className="astro-ring ring-3"></div>
-      <div className="astro-core"></div>
+const AstroLoader = ({ msg = "Consulting the Cosmos..." }: { msg?: string }) => {
+  const ctxRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx: AudioContext = new AudioCtx();
+      ctxRef.current = ctx;
+
+      // Master volume with fade-in
+      const master = ctx.createGain();
+      master.gain.setValueAtTime(0, ctx.currentTime);
+      master.gain.linearRampToValueAtTime(0.22, ctx.currentTime + 2.5);
+      master.connect(ctx.destination);
+
+      // Reverb-like effect using a convolver + delay
+      const delay = ctx.createDelay(0.4);
+      delay.delayTime.value = 0.3;
+      const delayGain = ctx.createGain();
+      delayGain.gain.value = 0.25;
+      delay.connect(delayGain);
+      delayGain.connect(master);
+
+      // Tremolo (slight wavering like a human voice)
+      const lfo = ctx.createOscillator();
+      const lfoGain = ctx.createGain();
+      lfo.frequency.value = 4.5;
+      lfoGain.gain.value = 0.04;
+      lfo.connect(lfoGain);
+      lfo.start();
+
+      // Om frequencies: fundamental 136.1Hz + harmonics
+      const layers: { freq: number; type: OscillatorType; vol: number }[] = [
+        { freq: 136.1,  type: "sine",     vol: 0.45 },
+        { freq: 272.2,  type: "sine",     vol: 0.18 },
+        { freq: 204.15, type: "triangle", vol: 0.12 },
+        { freq: 68.05,  type: "sine",     vol: 0.25 },
+      ];
+
+      const oscs: OscillatorNode[] = layers.map(({ freq, type, vol }) => {
+        const osc  = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = type;
+        osc.frequency.value = freq;
+        gain.gain.value = vol;
+        lfoGain.connect(gain.gain);   // apply tremolo
+        osc.connect(gain);
+        gain.connect(master);
+        gain.connect(delay);
+        osc.start();
+        return osc;
+      });
+
+      return () => {
+        const now = ctx.currentTime;
+        master.gain.setValueAtTime(master.gain.value, now);
+        master.gain.linearRampToValueAtTime(0, now + 1.2);
+        setTimeout(() => {
+          oscs.forEach(o => { try { o.stop(); } catch {} });
+          ctx.close();
+        }, 1300);
+      };
+    } catch {
+      // Browser doesn't support Web Audio — fail silently
+    }
+  }, []);
+
+  return (
+    <div style={{ padding: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
+      <div className="astro-loader-container">
+        <div className="astro-ring ring-1"></div>
+        <div className="astro-ring ring-2"></div>
+        <div className="astro-ring ring-3"></div>
+        <div className="astro-core"></div>
+      </div>
+      <div className="loader-msg">{msg}</div>
     </div>
-    <div className="loader-msg">{msg}</div>
-  </div>
-);
+  );
+};
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function Home() {
