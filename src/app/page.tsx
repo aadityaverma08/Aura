@@ -58,67 +58,66 @@ function getMoonPhase() {
 
 // ── Shared UI ─────────────────────────────────────────────────────────────────
 const AstroLoader = ({ msg = "Consulting the Cosmos..." }: { msg?: string }) => {
-  const ctxRef = useRef<AudioContext | null>(null);
-
   useEffect(() => {
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       const ctx: AudioContext = new AudioCtx();
-      ctxRef.current = ctx;
+      const now = ctx.currentTime;
 
-      // Master volume with fade-in
+      // ── Shankh (Conch Shell) Synthesis ────────────────────────────────────
+      // Master output
       const master = ctx.createGain();
-      master.gain.setValueAtTime(0, ctx.currentTime);
-      master.gain.linearRampToValueAtTime(0.22, ctx.currentTime + 2.5);
       master.connect(ctx.destination);
 
-      // Reverb-like effect using a convolver + delay
-      const delay = ctx.createDelay(0.4);
-      delay.delayTime.value = 0.3;
+      // Bandpass filter — gives the "horn mouth" resonance of a conch shell
+      const bpFilter = ctx.createBiquadFilter();
+      bpFilter.type = "bandpass";
+      bpFilter.frequency.value = 900;
+      bpFilter.Q.value = 0.6;
+      bpFilter.connect(master);
+
+      // Delay for cave-like reverb tail
+      const delay = ctx.createDelay(0.6);
+      delay.delayTime.value = 0.45;
       const delayGain = ctx.createGain();
-      delayGain.gain.value = 0.25;
+      delayGain.gain.value = 0.3;
       delay.connect(delayGain);
       delayGain.connect(master);
 
-      // Tremolo (slight wavering like a human voice)
-      const lfo = ctx.createOscillator();
-      const lfoGain = ctx.createGain();
-      lfo.frequency.value = 4.5;
-      lfoGain.gain.value = 0.04;
-      lfo.connect(lfoGain);
-      lfo.start();
-
-      // Om frequencies: fundamental 136.1Hz + harmonics
-      const layers: { freq: number; type: OscillatorType; vol: number }[] = [
-        { freq: 136.1,  type: "sine",     vol: 0.45 },
-        { freq: 272.2,  type: "sine",     vol: 0.18 },
-        { freq: 204.15, type: "triangle", vol: 0.12 },
-        { freq: 68.05,  type: "sine",     vol: 0.25 },
+      // Shankh harmonic layers (sawtooth = bright & brassy like a conch)
+      const harmonics = [
+        { freq: 233,  vol: 0.55 },   // fundamental (Bb3)
+        { freq: 466,  vol: 0.30 },   // octave
+        { freq: 699,  vol: 0.18 },   // 5th harmonic
+        { freq: 932,  vol: 0.10 },   // 4th harmonic
+        { freq: 1165, vol: 0.05 },   // brightness
       ];
 
-      const oscs: OscillatorNode[] = layers.map(({ freq, type, vol }) => {
+      harmonics.forEach(({ freq, vol }) => {
         const osc  = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.type = type;
-        osc.frequency.value = freq;
-        gain.gain.value = vol;
-        lfoGain.connect(gain.gain);   // apply tremolo
+
+        osc.type = "sawtooth"; // bright, brassy timbre
+        // Pitch starts slightly sharp then drops — classic shankh "wail"
+        osc.frequency.setValueAtTime(freq * 1.08, now);
+        osc.frequency.linearRampToValueAtTime(freq * 0.97, now + 0.6);
+        osc.frequency.linearRampToValueAtTime(freq,        now + 1.4);
+
+        // Fast attack → hold → exponential decay (like a blown conch)
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(vol, now + 0.04);  // sharp attack
+        gain.gain.setValueAtTime(vol,          now + 0.4);   // hold
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 3.5); // long decay
+
         osc.connect(gain);
-        gain.connect(master);
+        gain.connect(bpFilter);
         gain.connect(delay);
-        osc.start();
-        return osc;
+        osc.start(now);
+        osc.stop(now + 3.6);
       });
 
-      return () => {
-        const now = ctx.currentTime;
-        master.gain.setValueAtTime(master.gain.value, now);
-        master.gain.linearRampToValueAtTime(0, now + 1.2);
-        setTimeout(() => {
-          oscs.forEach(o => { try { o.stop(); } catch {} });
-          ctx.close();
-        }, 1300);
-      };
+      // Cleanup: close context after sound ends
+      setTimeout(() => { try { ctx.close(); } catch {} }, 4000);
     } catch {
       // Browser doesn't support Web Audio — fail silently
     }
