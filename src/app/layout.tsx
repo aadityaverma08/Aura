@@ -26,9 +26,7 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${cinzel.variable} ${urbanist.variable}`}>
       <body>
-        <div className="container">
-          {children}
-        </div>
+        {children}
       </body>
     </html>
   );

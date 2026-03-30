@@ -1,47 +1,142 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import KundliChart from "@/components/KundliChart";
+import StarCanvas from "@/components/StarCanvas";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
+// ── Types ────────────────────────────────────────────────────────────────────
+type FormData = { name: string; dateOfBirth: string; timeOfBirth: string; location: string; lat: string; lon: string; };
+type Message  = { role: "user" | "model"; content: string };
+type LocState = { query: string; results: any[]; show: boolean };
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const PLANET_GLYPHS: Record<string, string> = {
+  Sun: "☉", Moon: "☽", Mars: "♂", Mercury: "☿",
+  Jupiter: "♃", Venus: "♀", Saturn: "♄", Rahu: "☊", Ketu: "☋",
+};
+
+const ELEMENT_COLORS: Record<string, string> = {
+  Fire: "#ef4444", Earth: "#84cc16", Air: "#60a5fa", Water: "#06b6d4",
+};
+
+const TABS = [
+  { id: "horoscope", label: "Today" },
+  { id: "decision",  label: "Decision Maker" },
+  { id: "chat",      label: "Ask Aura" },
+  { id: "compatibility", label: "Compatibility" },
+  { id: "timeline",  label: "Timeline" },
+  { id: "remedies",  label: "Remedies" },
+  { id: "planets",   label: "Planets" },
+  { id: "chart",     label: "Chart" },
+];
+
+const SUGGESTIONS = [
+  "What does my Moon sign reveal about me?",
+  "Which career path suits my chart?",
+  "Tell me about my love life & relationships.",
+  "What are my strengths and weaknesses?",
+  "What does my current Dasha mean?",
+];
+
+// ── Moon Phase Utility ────────────────────────────────────────────────────────
+function getMoonPhase() {
+  const knownNew = new Date("2024-01-11T11:57:00Z");
+  const CYCLE    = 29.530588853;
+  const days     = (Date.now() - knownNew.getTime()) / 864e5;
+  const phase    = ((days % CYCLE) + CYCLE) % CYCLE;
+  if (phase < 1.85)  return { name: "New Moon",        emoji: "🌑" };
+  if (phase < 7.38)  return { name: "Waxing Crescent", emoji: "🌒" };
+  if (phase < 9.22)  return { name: "First Quarter",   emoji: "🌓" };
+  if (phase < 14.77) return { name: "Waxing Gibbous",  emoji: "🌔" };
+  if (phase < 16.61) return { name: "Full Moon",        emoji: "🌕" };
+  if (phase < 22.15) return { name: "Waning Gibbous",  emoji: "🌖" };
+  if (phase < 23.99) return { name: "Last Quarter",    emoji: "🌗" };
+  return               { name: "Waning Crescent",      emoji: "🌘" };
+}
+
+// ── Shared UI ─────────────────────────────────────────────────────────────────
+const AstroLoader = ({ msg = "Consulting the Cosmos..." }: { msg?: string }) => (
+  <div style={{ padding: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", width: "100%" }}>
+    <div className="astro-loader-container">
+      <div className="astro-ring ring-1"></div>
+      <div className="astro-ring ring-2"></div>
+      <div className="astro-ring ring-3"></div>
+      <div className="astro-core"></div>
+    </div>
+    <div className="loader-msg">{msg}</div>
+  </div>
+);
+
+// ── Component ─────────────────────────────────────────────────────────────────
 export default function Home() {
-  const [formData, setFormData] = useState({ name: "", dateOfBirth: "1995-10-15", timeOfBirth: "14:30", location: "", lat: "0", lon: "0" });
-  const [kundliData, setKundliData] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
+  const [formData, setFormData] = useState<FormData>({
+    name: "", dateOfBirth: "1995-10-15", timeOfBirth: "14:30", location: "", lat: "0", lon: "0",
+  });
+  const [kundliData,  setKundliData]  = useState<any>(null);
+  const [loading,     setLoading]     = useState(false);
+  const [currentTab,  setCurrentTab]  = useState("horoscope");
+  const [locSearch,   setLocSearch]   = useState<LocState>({ query: "", results: [], show: false });
+  const [messages,    setMessages]    = useState<Message[]>([]);
+  const [inputMsg,    setInputMsg]    = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [showChips,   setShowChips]   = useState(true);
+  const [savedSession, setSavedSession] = useState<{ kundliData: any; formData: FormData } | null>(null);
   
-  // View/Tab state
-  const [currentTab, setCurrentTab] = useState("horoscope");
+  // AI Feature State
+  const [aiResponses, setAiResponses] = useState<Record<string, string>>({});
+  const [loadingModes, setLoadingModes] = useState<Record<string, boolean>>({});
+  const [decisionQuestion, setDecisionQuestion] = useState("");
   
-  // Location Search State
-  const [locSearch, setLocSearch] = useState({ query: "", results: [], show: false });
+  // Compatibility State
+  const [partnerData, setPartnerData] = useState<FormData>({ name: "", dateOfBirth: "", timeOfBirth: "", location: "", lat: "0", lon: "0" });
+  const [partnerLocSearch, setPartnerLocSearch] = useState<LocState>({ query: "", results: [], show: false });
 
-  // Chat/Horoscope state
-  const [messages, setMessages] = useState<{role: string, content: string}[]>([]);
-  const [inputMessage, setInputMessage] = useState("");
-  const [isChatLoading, setIsChatLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  const handleLocationSearch = async (query: string) => {
-    setLocSearch(prev => ({ ...prev, query }));
-    if (query.length < 3) {
-        setLocSearch(prev => ({ ...prev, results: [], show: false }));
-        return;
-    }
+  // Load saved session from localStorage
+  useEffect(() => {
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`);
+      const k = localStorage.getItem("aura_kundli");
+      const f = localStorage.getItem("aura_form");
+      if (k && f) setSavedSession({ kundliData: JSON.parse(k), formData: JSON.parse(f) });
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  // Current dasha
+  const currentDasha = useMemo(() => {
+    if (!kundliData?.dasha) return null;
+    const now = new Date();
+    return kundliData.dasha.find((d: any) => new Date(d.start) <= now && new Date(d.end) >= now) || kundliData.dasha[0];
+  }, [kundliData]);
+
+  const moonPhase = useMemo(() => getMoonPhase(), []);
+
+  // ── Handlers ────────────────────────────────────────────────────────────────
+  const handleLocationSearch = async (query: string, isPartner = false) => {
+    const setState = isPartner ? setPartnerLocSearch : setLocSearch;
+    setState(p => ({ ...p, query }));
+    if (query.length < 3) { setState(p => ({ ...p, results: [], show: false })); return; }
+    try {
+      const res  = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`);
       const data = await res.json();
-      setLocSearch(prev => ({ ...prev, results: data, show: true }));
-    } catch (err) {
-      console.error("Location search failed", err);
+      setState(p => ({ ...p, results: data, show: true }));
+    } catch {}
+  };
+
+  const selectLocation = (loc: any, isPartner = false) => {
+    if (isPartner) {
+      setPartnerData(f => ({ ...f, location: loc.display_name, lat: loc.lat, lon: loc.lon }));
+      setPartnerLocSearch(p => ({ ...p, query: loc.display_name, show: false }));
+    } else {
+      setFormData(f => ({ ...f, location: loc.display_name, lat: loc.lat, lon: loc.lon }));
+      setLocSearch(p => ({ ...p, query: loc.display_name, show: false }));
     }
-  };
-
-  const selectLocation = (loc: any) => {
-    setFormData({ ...formData, location: loc.display_name, lat: loc.lat, lon: loc.lon });
-    setLocSearch(prev => ({ ...prev, query: loc.display_name, show: false }));
-  };
-
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
   const handleGenerateKundli = async (e: React.FormEvent) => {
@@ -52,17 +147,17 @@ export default function Home() {
     }
     setLoading(true);
     try {
-      const res = await fetch('/api/kundli', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
-      });
+      const res    = await fetch("/api/kundli", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(formData) });
       const result = await res.json();
-      
       if (result.success) {
         setKundliData(result.data);
-        setMessages([{ role: 'model', content: `The cosmos has aligned for ${formData.name}. How can I assist you with your specific question?` }]);
-        setCurrentTab("horoscope"); // Set Today's Forecast as the default view
+        setMessages([{ role: "model", content: `The cosmos has aligned for ${formData.name}. ✨ I can see your chart clearly — ask me anything about your destiny, career, love, or health.` }]);
+        setShowChips(true);
+        setCurrentTab("horoscope");
+        localStorage.setItem("aura_kundli", JSON.stringify(result.data));
+        localStorage.setItem("aura_form",   JSON.stringify(formData));
+        setSavedSession({ kundliData: result.data, formData });
+        fetchAiFeature('daily', undefined, undefined, result.data);
       } else {
         alert("Error: " + result.error);
       }
@@ -72,193 +167,479 @@ export default function Home() {
     setLoading(false);
   };
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  const loadSavedSession = () => {
+    if (!savedSession) return;
+    setKundliData(savedSession.kundliData);
+    setFormData(savedSession.formData);
+    setMessages([{ role: "model", content: `Welcome back, ${savedSession.formData.name}! 🌙 The stars remember you. What would you like to explore today?` }]);
+    setShowChips(true);
+    setCurrentTab("horoscope");
+    fetchAiFeature('daily', undefined, undefined, savedSession.kundliData);
+  };
 
-  const handleSendMessage = async (e?: React.FormEvent, overrideStr?: string) => {
+  const handleSendMessage = async (e?: React.FormEvent, override?: string) => {
     if (e) e.preventDefault();
-    const userMsg = overrideStr || inputMessage;
+    const userMsg = override || inputMsg;
     if (!userMsg.trim()) return;
-    
-    setInputMessage("");
-    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
-    setIsChatLoading(true);
-
+    setInputMsg("");
+    setShowChips(false);
+    const updated: Message[] = [...messages, { role: "user", content: userMsg }];
+    setMessages(updated);
+    setChatLoading(true);
     try {
-      const chatContext = [...messages, { role: 'user', content: userMsg }];
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: chatContext, kundliContext: kundliData })
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: updated, kundliContext: kundliData }),
       });
       if (!res.ok) throw new Error("Chat failed.");
-      
-      const reader = res.body?.getReader();
+      const reader  = res.body?.getReader();
       const decoder = new TextDecoder();
-      let done = false;
-      let modelResponse = "";
-      setMessages(prev => [...prev, { role: 'model', content: "" }]);
-
+      let done = false, modelResponse = "";
+      setMessages(p => [...p, { role: "model", content: "" }]);
       while (reader && !done) {
         const { value, done: doneReading } = await reader.read();
         done = doneReading;
-        const chunkValue = decoder.decode(value, { stream: true });
-        modelResponse += chunkValue;
-        setMessages(prev => {
-          const newMessages = [...prev];
-          newMessages[newMessages.length - 1].content = modelResponse;
-          return newMessages;
-        });
+        modelResponse += decoder.decode(value, { stream: true });
+        setMessages(p => { const n = [...p]; n[n.length - 1] = { role: "model", content: modelResponse }; return n; });
       }
-    } catch (err) {
-      console.error(err);
-      setMessages(prev => [...prev, { role: 'model', content: "The signals are weak. Retrying..." }]);
+    } catch {
+      setMessages(p => [...p, { role: "model", content: "The signals are temporarily disrupted. Please try again." }]);
     }
-    setIsChatLoading(false);
+    setChatLoading(false);
   };
 
+  const fetchAiFeature = async (mode: string, partnerParams?: any, decisionQuery?: string, overrideContext?: any) => {
+    setLoadingModes(p => ({ ...p, [mode]: true }));
+    setAiResponses(p => ({ ...p, [mode]: "" }));
+    try {
+      const initialMessage = decisionQuery || 
+                             (mode === 'timeline' ? "Generate my life timeline." :
+                              mode === 'career' ? "Give me career and finance predictions." :
+                              mode === 'remedies' ? "Provide astrological remedies." :
+                              mode === 'compatibility' ? "Analyze our compatibility." :
+                              mode === 'daily' ? "Give me my daily horoscope with luck scores." : "Read my chart.");
+      
+      const payload: any = { messages: [{ role: "user", content: initialMessage }], kundliContext: overrideContext || kundliData, mode };
+      if (partnerParams) payload.partnerKundli = partnerParams;
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error();
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let done = false, modelResponse = "";
+      while (reader && !done) {
+        const { value, done: doneReading } = await reader.read();
+        done = doneReading;
+        modelResponse += decoder.decode(value, { stream: true });
+        setAiResponses(p => ({ ...p, [mode]: modelResponse }));
+      }
+    } catch {
+      setAiResponses(p => ({ ...p, [mode]: "Error consulting the stars. Please try again." }));
+    }
+    setLoadingModes(p => ({ ...p, [mode]: false }));
+  };
+
+  const handleCompatibility = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!partnerData.lat || partnerData.lat === "0") { alert("Select partner's location."); return; }
+    setLoadingModes(p => ({ ...p, compatibility: true }));
+    try {
+      const kRes = await fetch("/api/kundli", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(partnerData) });
+      const kData = await kRes.json();
+      if (!kData.success) throw new Error(kData.error);
+      await fetchAiFeature('compatibility', kData.data);
+    } catch (err: any) {
+      alert("Failed to calculate compatibility: " + err.message);
+      setLoadingModes(p => ({ ...p, compatibility: false }));
+    }
+  };
+
+  const handleDecision = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!decisionQuestion.trim()) return;
+    fetchAiFeature('decision', null, decisionQuestion);
+  };
+
+  // ── Render: Main App ────────────────────────────────────────────────────────
   if (kundliData) {
+    const sun  = kundliData.planets.Sun;
+    const moon = kundliData.planets.Moon;
+
     return (
-      <main className="main-content" style={{ padding: '1rem', display: 'flex', flexDirection: 'column' }}>
-        
-        {/* Navigation Bar */}
-        <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-          <h2 style={{ fontSize: '1.2rem', opacity: 0.7, marginBottom: '1.5rem' }}>Aura | {formData.name}</h2>
-          <nav style={{ display: 'flex', justifyContent: 'center', gap: '1rem', borderBottom: '1px solid var(--color-border)', paddingBottom: '1rem', maxWidth: '800px', margin: '0 auto' }}>
-            <button onClick={() => setCurrentTab('horoscope')} className={currentTab === 'horoscope' ? 'nav-tab active-tab' : 'nav-tab'}>Today&apos;s Forecast</button>
-            <button onClick={() => setCurrentTab('chat')} className={currentTab === 'chat' ? 'nav-tab active-tab' : 'nav-tab'}>Ask Aura</button>
-            <button onClick={() => setCurrentTab('planets')} className={currentTab === 'planets' ? 'nav-tab active-tab' : 'nav-tab'}>Planet Details</button>
-            <button onClick={() => setCurrentTab('chart')} className={currentTab === 'chart' ? 'nav-tab active-tab' : 'nav-tab'}>Birth Chart</button>
+      <>
+        <StarCanvas />
+        <main className="app-main" style={{ position: "relative", zIndex: 1 }}>
+
+          {/* Profile Banner */}
+          <div className="profile-banner">
+            <div className="profile-info">
+              <div className="profile-name">{formData.name}</div>
+              <div className="profile-signs">
+                <span style={{ color: ELEMENT_COLORS[sun?.element] }}>☉ {sun?.rashi}</span>
+                <span style={{ opacity: 0.4 }}>·</span>
+                <span style={{ color: ELEMENT_COLORS[moon?.element] }}>☽ {moon?.rashi}</span>
+                {currentDasha && <>
+                  <span style={{ opacity: 0.4 }}>·</span>
+                  <span style={{ color: "var(--color-secondary-accent)" }}>
+                    {PLANET_GLYPHS[currentDasha.planet]} {currentDasha.planet} Dasha
+                  </span>
+                </>}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+              <button className="btn-ghost" onClick={() => setKundliData(null)}>← New Chart</button>
+            </div>
+          </div>
+
+          {/* Tab Navigation */}
+          <nav className="tab-nav">
+            {TABS.map(t => (
+              <button key={t.id} onClick={() => setCurrentTab(t.id)}
+                className={`nav-tab ${currentTab === t.id ? "active-tab" : ""}`}>
+                {t.label}
+              </button>
+            ))}
           </nav>
-        </div>
 
-        <div style={{ flex: 1, width: '100%', maxWidth: '800px', margin: '0 auto' }}>
-          
-          {/* Chart Page */}
-          {currentTab === 'chart' && (
-            <div className="glass-panel" style={{ textAlign: 'center', padding: '2rem' }}>
-              <h3 style={{ color: 'var(--color-secondary-accent)', marginBottom: '1.5rem' }}>Your Celestial Map</h3>
-              <KundliChart planets={kundliData.planets} />
-              <div style={{ marginTop: '2rem', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                <div className="glass-panel" style={{ padding: '1rem' }}>
-                  <div style={{ fontSize: '0.7rem', opacity: 0.6 }}>Sun Position</div>
-                  <div style={{ fontWeight: 'bold', color: 'var(--color-accent)' }}>{kundliData.planets.Sun?.house}th House</div>
+          <div className="tab-content" style={{ overflowY: "auto", flex: 1, paddingBottom: "2rem" }}>
+
+            {/* TODAY'S FORECAST */}
+            {currentTab === "horoscope" && (
+              <div className="glass-panel fade-in">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem", flexWrap: "wrap", gap: "1rem" }}>
+                  <h3 style={{ margin: 0 }}>Today&apos;s Forecast</h3>
+                  <div className="moon-phase-badge">{moonPhase.emoji} {moonPhase.name}</div>
                 </div>
-                <div className="glass-panel" style={{ padding: '1rem' }}>
-                  <div style={{ fontSize: '0.7rem', opacity: 0.6 }}>Moon Position</div>
-                  <div style={{ fontWeight: 'bold', color: 'var(--color-accent)' }}>{kundliData.planets.Moon?.house}th House</div>
-                </div>
-              </div>
-            </div>
-          )}
 
-          {/* Planetary Details Page */}
-          {currentTab === 'planets' && (
-            <div className="glass-panel" style={{ padding: '2rem' }}>
-              <h3 style={{ marginBottom: '1.5rem', textAlign: 'center' }}>Planetary Geometry</h3>
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr style={{ borderBottom: '2px solid var(--color-border)' }}>
-                      <th style={{ textAlign: 'left', padding: '1rem' }}>Body</th>
-                      <th style={{ textAlign: 'center', padding: '1rem' }}>House</th>
-                      <th style={{ textAlign: 'right', padding: '1rem' }}>Degrees</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Object.entries(kundliData.planets).map(([name, data]: [string, any]) => (
-                      <tr key={name} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                        <td style={{ padding: '1rem' }}>{name} ({data.symbol})</td>
-                        <td style={{ textAlign: 'center', padding: '1rem' }}>{data.house}</td>
-                        <td style={{ textAlign: 'right', padding: '1rem' }}>{data.degree}°</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                  <div className="markdown-body chat-bubble model" style={{ borderRadius: "12px", width: "100%", whiteSpace: "pre-wrap", background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}>
+                    {loadingModes['daily'] && !aiResponses['daily'] ? (
+                      <AstroLoader msg="Reading today's stars..." />
+                    ) : (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiResponses['daily']}</ReactMarkdown>
+                    )}
+                  </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Today's Forecast Page */}
-          {currentTab === 'horoscope' && (
-            <div className="glass-panel" style={{ padding: '2rem', minHeight: '400px' }}>
-              <h3 style={{ textAlign: 'center', marginBottom: '1.5rem' }}>Today&apos;s Forecast</h3>
-              <div style={{ background: 'rgba(255,255,255,0.03)', padding: '2rem', borderRadius: '12px', border: '1px solid var(--color-border)', lineHeight: '1.7' }}>
-                <p style={{ opacity: 0.8 }}>Current planetary transits are influencing your birth placements. Based on today&apos;s celestial alignment, your primary focus is on your {kundliData.planets.Sun?.house}th House.</p>
-                <div style={{ marginTop: '2rem', display: 'flex', gap: '1rem' }}>
-                    <div style={{ flex: 1, padding: '1rem', background: 'rgba(139,92,246,0.05)', borderRadius: '8px', border: '1px solid rgba(139,92,246,0.1)' }}>
-                        <span style={{ fontSize: '0.7rem', textTransform: 'uppercase' }}>Current Flow</span><br/><b>Growth & Awakening</b>
+            {/* AI CHAT */}
+            {currentTab === "chat" && (
+              <div className="glass-panel fade-in" style={{ display: "flex", flexDirection: "column", height: "65vh" }}>
+                <h3 style={{ marginBottom: "1rem", flexShrink: 0 }}>Ask Aura</h3>
+                <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.75rem", marginBottom: "1rem" }}>
+                  {messages.map((m, i) => (
+                    <div key={i} className={`chat-bubble ${m.role}`}>
+                      {m.role === "model" && <span className="bubble-icon">✦</span>}
+                      <div className="markdown-body" style={{ flex: 1, whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
+                        {m.content ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown> : <AstroLoader msg="Aura is thinking..." />}
+                      </div>
                     </div>
+                  ))}
+                  <div ref={chatEndRef} />
                 </div>
-                <button onClick={() => { setCurrentTab('chat'); handleSendMessage(undefined, "Give me a detailed horoscope report for today based on my chart.")}} className="btn-primary" style={{ marginTop: '2rem', width: '100%' }}>Get Detailed AI Reading</button>
-              </div>
-            </div>
-          )}
 
-          {/* AI Chat Page */}
-          {currentTab === 'chat' && (
-            <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', height: '600px' }}>
-              <h3 style={{ marginBottom: '1rem' }}>Aura Chat</h3>
-              <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
-                {messages.map((m, idx) => (
-                  <div key={idx} style={{ 
-                    padding: '1rem', 
-                    background: m.role === 'user' ? 'rgba(139,92,246,0.1)' : 'rgba(255,255,255,0.02)', 
-                    borderRadius: '12px', 
-                    alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start', 
-                    maxWidth: '80%',
-                    border: '1px solid rgba(255,255,255,0.05)'
-                  }}>{m.content}</div>
-                ))}
-                <div ref={chatEndRef} />
-              </div>
-              <form onSubmit={e => handleSendMessage(e)} style={{ display: 'flex', gap: '0.5rem', borderTop: '1px solid var(--color-border)', paddingTop: '1rem' }}>
-                <input type="text" className="form-input" value={inputMessage} onChange={e => setInputMessage(e.target.value)} disabled={isChatLoading} style={{ flex: 1 }} placeholder="Ask destiny..." />
-                <button type="submit" className="btn-primary" style={{ width: 'auto', padding: '0 1.5rem' }} disabled={isChatLoading || !inputMessage.trim()}>Send</button>
-              </form>
-            </div>
-          )}
+                {showChips && messages.length <= 1 && (
+                  <div className="suggestion-chips">
+                    {SUGGESTIONS.map(q => (
+                      <button key={q} className="chip" onClick={() => handleSendMessage(undefined, q)}>{q}</button>
+                    ))}
+                  </div>
+                )}
 
-          <button onClick={() => setKundliData(null)} style={{ marginTop: '2rem', width: '100%', background: 'transparent', border: '1px solid var(--color-border)', color: 'var(--color-text)', opacity: 0.5 }} className="btn-primary">Back to Start</button>
-        </div>
-      </main>
+                <form onSubmit={handleSendMessage} className="chat-form">
+                  <input type="text" className="form-input" value={inputMsg}
+                    onChange={e => setInputMsg(e.target.value)} disabled={chatLoading}
+                    placeholder="Ask destiny..." style={{ flex: 1 }} />
+                  <button type="submit" className="btn-primary"
+                    style={{ width: "auto", padding: "0 1.5rem" }}
+                    disabled={chatLoading || !inputMsg.trim()}>
+                    {chatLoading ? "…" : "Send"}
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {/* GENERIC AI FEATURE TABS (Timeline, Career, Remedies) */}
+            {['timeline', 'career', 'remedies'].includes(currentTab) && (
+              <div className="glass-panel fade-in">
+                <h3 style={{ marginBottom: "1.5rem" }}>{TABS.find(t => t.id === currentTab)?.label}</h3>
+                
+                {!aiResponses[currentTab] && !loadingModes[currentTab] && (
+                  <button className="btn-primary" onClick={() => fetchAiFeature(currentTab)}>
+                    ✨ Extract {TABS.find(t => t.id === currentTab)?.label} Insights
+                  </button>
+                )}
+
+                {(loadingModes[currentTab] || aiResponses[currentTab]) && (
+                  <div className="markdown-body" style={{ background: "rgba(0,0,0,0.2)", padding: "1.5rem", borderRadius: "12px", border: "1px solid rgba(255,255,255,0.05)" }}>
+                    {loadingModes[currentTab] && !aiResponses[currentTab] ? (
+                       <AstroLoader msg={`Analyzing ${currentTab}...`} />
+                    ) : (
+                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiResponses[currentTab]}</ReactMarkdown>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* DECISION MAKER */}
+            {currentTab === "decision" && (
+              <div className="glass-panel fade-in">
+                <h3 style={{ marginBottom: "0.5rem" }}>Decision Maker Mode</h3>
+                <p style={{ fontSize: "0.85rem", opacity: 0.7, marginBottom: "2rem" }}>Ask a specific YES/NO question, and Aura will consult your chart to calculate the probability of success.</p>
+                
+                <form onSubmit={handleDecision} style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginBottom: "2rem" }}>
+                  <input type="text" className="form-input" value={decisionQuestion}
+                    onChange={e => setDecisionQuestion(e.target.value)} disabled={loadingModes['decision']}
+                    placeholder="E.g., Should I switch my job this month?" style={{ flex: 1, minWidth: "250px" }} />
+                  <button type="submit" className="btn-primary" style={{ width: "auto" }} disabled={loadingModes['decision'] || !decisionQuestion.trim()}>
+                    {loadingModes['decision'] ? "Calculating..." : "Consult"}
+                  </button>
+                </form>
+                
+                {(loadingModes['decision'] || aiResponses['decision']) && (
+                  <div className="markdown-body" style={{ background: "rgba(0,0,0,0.2)", padding: "1.5rem", borderRadius: "12px", border: "1px solid rgba(255,255,255,0.05)" }}>
+                    {loadingModes['decision'] && !aiResponses['decision'] ? (
+                      <AstroLoader msg="Weighing the probabilities..." />
+                    ) : (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiResponses['decision']}</ReactMarkdown>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* COMPATIBILITY */}
+            {currentTab === "compatibility" && (
+              <div className="glass-panel fade-in">
+                <h3 style={{ marginBottom: "0.5rem" }}>Love & Compatibility Analysis</h3>
+                <p style={{ fontSize: "0.85rem", opacity: 0.7, marginBottom: "2rem" }}>Enter the birth details of your partner to evaluate relationship harmony, longevity, and key dynamics.</p>
+                
+                {!aiResponses['compatibility'] && !loadingModes['compatibility'] && (
+                  <form onSubmit={handleCompatibility} style={{ display: "flex", flexDirection: "column", gap: "1rem", background: "rgba(0,0,0,0.2)", padding: "1.5rem", borderRadius: "12px" }}>
+                    <div className="form-group">
+                      <label>Partner's Name</label>
+                      <input type="text" className="form-input" required value={partnerData.name} onChange={e => setPartnerData(f => ({...f, name: e.target.value}))} />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+                      <div className="form-group">
+                        <label>Date of Birth</label>
+                        <input type="date" className="form-input" required value={partnerData.dateOfBirth} onChange={e => setPartnerData(f => ({...f, dateOfBirth: e.target.value}))}/>
+                      </div>
+                      <div className="form-group">
+                        <label>Time of Birth</label>
+                        <input type="time" className="form-input" required value={partnerData.timeOfBirth} onChange={e => setPartnerData(f => ({...f, timeOfBirth: e.target.value}))}/>
+                      </div>
+                    </div>
+                    <div className="form-group" style={{ position: "relative" }}>
+                      <label>Birth Location</label>
+                      <input type="text" className="form-input" value={partnerLocSearch.query} onChange={e => handleLocationSearch(e.target.value, true)} placeholder="Search city…" autoComplete="off" required />
+                      {partnerLocSearch.show && (
+                        <div className="dropdown-panel">
+                          {partnerLocSearch.results.map((loc: any, i: number) => (
+                             <div key={i} className="dropdown-item" onClick={() => selectLocation(loc, true)}>{loc.display_name}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button type="submit" className="btn-primary" style={{ marginTop: "1rem" }} disabled={loadingModes['compatibility']}>
+                      Match Charts ✨
+                    </button>
+                  </form>
+                )}
+                
+                {(loadingModes['compatibility'] || aiResponses['compatibility']) && (
+                  <div className="markdown-body" style={{ background: "rgba(0,0,0,0.2)", padding: "1.5rem", borderRadius: "12px", border: "1px solid rgba(255,255,255,0.05)" }}>
+                    {loadingModes['compatibility'] && !aiResponses['compatibility'] ? (
+                       <AstroLoader msg="Calculating compatibility..." />
+                    ) : (
+                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiResponses['compatibility']}</ReactMarkdown>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* PANCHANG */}
+            {currentTab === "panchang" && (
+              <div className="glass-panel fade-in">
+                <h3 style={{ marginBottom: "0.5rem", textAlign: "center" }}>Panchang at Birth</h3>
+                <p style={{ textAlign: "center", fontSize: "0.8rem", marginBottom: "2rem" }}>
+                  {formData.dateOfBirth} · {formData.timeOfBirth} · {formData.location}
+                </p>
+                <div className="panchang-grid">
+                  {[
+                    { label: "Tithi",       val: kundliData.panchang.tithi,     sub: "Lunar Day",          icon: "🌕" },
+                    { label: "Nakshatra",   val: kundliData.panchang.nakshatra, sub: `Pada ${kundliData.panchang.nakshatraPada}`, icon: "⭐" },
+                    { label: "Yoga",        val: kundliData.panchang.yoga,      sub: "Sun+Moon combination",icon: "☯️" },
+                    { label: "Karana",      val: kundliData.panchang.karana,    sub: "Half Tithi",          icon: "🔮" },
+                    { label: "Moon Sign",   val: moon?.rashi,                   sub: moon?.element,         icon: "☽" },
+                    { label: "Sun Sign",    val: sun?.rashi,                    sub: sun?.element,          icon: "☉" },
+                  ].map(item => (
+                    <div key={item.label} className="panchang-card">
+                      <div className="panchang-icon">{item.icon}</div>
+                      <div className="panchang-label">{item.label}</div>
+                      <div className="panchang-val">{item.val}</div>
+                      <div className="panchang-sub">{item.sub}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* DASHA */}
+            {currentTab === "dasha" && (
+              <div className="glass-panel fade-in">
+                <h3 style={{ marginBottom: "0.5rem", textAlign: "center" }}>Vimsottari Dasha Timeline</h3>
+                <p style={{ textAlign: "center", fontSize: "0.8rem", marginBottom: "2rem" }}>120-year planetary period cycle based on Moon Nakshatra</p>
+                <div className="dasha-list">
+                  {kundliData.dasha.map((d: any, i: number) => {
+                    const now       = new Date();
+                    const start     = new Date(d.start);
+                    const end       = new Date(d.end);
+                    const isActive  = start <= now && end >= now;
+                    const isPast    = end < now;
+                    return (
+                      <div key={i} className={`dasha-item ${isActive ? "dasha-active" : ""} ${isPast ? "dasha-past" : ""}`}>
+                        <div className="dasha-glyph">{PLANET_GLYPHS[d.planet] || d.planet[0]}</div>
+                        <div className="dasha-body">
+                          <div className="dasha-planet">{d.planet} Mahadasha</div>
+                          <div className="dasha-dates">{start.getFullYear()} — {end.getFullYear()}</div>
+                        </div>
+                        <div className="dasha-years">{d.years} yrs</div>
+                        {isActive && <div className="dasha-now-badge">NOW</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* PLANETS */}
+            {currentTab === "planets" && (
+              <div className="glass-panel fade-in">
+                <h3 style={{ marginBottom: "1.5rem", textAlign: "center" }}>Planetary Positions</h3>
+                <div style={{ overflowX: "auto" }}>
+                  <table className="planets-table">
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left" }}>Planet</th>
+                        <th>Rashi</th>
+                        <th>House</th>
+                        <th>Element</th>
+                        <th>Degree</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(kundliData.planets).map(([name, p]: [string, any]) => (
+                        <tr key={name}>
+                          <td>
+                            <span style={{ marginRight: "0.5rem", fontSize: "1rem" }}>{PLANET_GLYPHS[name]}</span>
+                            {name}
+                          </td>
+                          <td style={{ textAlign: "center" }}>
+                            {p.rashiSymbol} {p.rashi}
+                          </td>
+                          <td style={{ textAlign: "center", color: "var(--color-accent)" }}>{p.house}</td>
+                          <td style={{ textAlign: "center" }}>
+                            <span className="element-badge" style={{ background: ELEMENT_COLORS[p.element] + "25", color: ELEMENT_COLORS[p.element], border: `1px solid ${ELEMENT_COLORS[p.element]}44` }}>
+                              {p.element}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: "right", opacity: 0.7 }}>{p.degree}°</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* CHART VIEW */}
+            {currentTab === "chart" && (
+               <div className="glass-panel fade-in" style={{ textAlign: "center" }}>
+                 <h3 style={{ marginBottom: "0.5rem" }}>Your Celestial Map</h3>
+                 <p style={{ fontSize: "0.8rem", marginBottom: "1.5rem" }}>Hover over a planet glyph to see its placement details</p>
+                 <KundliChart planets={kundliData.planets} />
+               </div>
+            )}
+
+          </div>
+        </main>
+      </>
     );
   }
 
+  // ── Render: Landing Page ────────────────────────────────────────────────────
   return (
-    <main className="main-content">
-      <div style={{ textAlign: 'center', marginBottom: '3rem' }}>
-        <h1 style={{ fontSize: '4rem', marginBottom: '0.5rem', background: 'linear-gradient(to right, #fff, var(--color-accent))', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Aura</h1>
-        <p style={{ opacity: 0.6 }}>Unlock the mysteries of your soul through the stars.</p>
-      </div>
+    <>
+      <StarCanvas />
+      <main className="main-content" style={{ position: "relative", zIndex: 1 }}>
+        <div style={{ textAlign: "center", marginBottom: "2.5rem" }}>
+          <h1>Aura</h1>
+          <p>Unlock the mysteries of your soul through the stars.</p>
+        </div>
 
-      <div className="glass-panel" style={{ maxWidth: '500px', width: '100%' }}>
-        <form onSubmit={handleGenerateKundli} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-          
-          <div style={{ width: '100%' }}>
-            <h4 style={{ marginBottom: '1.5rem', opacity: 0.8, textTransform: 'uppercase', letterSpacing: '1px', fontSize: '0.8rem' }}>Identity Details</h4>
-            <div className="form-group"><label>Full Name</label><input type="text" name="name" className="form-input" value={formData.name} onChange={handleChange} required /></div>
-            <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
-              <div className="form-group" style={{ flex: 1 }}><label>Birth Date</label><input type="date" name="dateOfBirth" className="form-input" value={formData.dateOfBirth} onChange={handleChange} required /></div>
-              <div className="form-group" style={{ flex: 1 }}><label>Birth Time</label><input type="time" name="timeOfBirth" className="form-input" value={formData.timeOfBirth} onChange={handleChange} required /></div>
+        {savedSession && (
+          <div className="resume-banner">
+            <div>
+              <div style={{ fontWeight: 600 }}>Welcome back, {savedSession.formData.name} ✨</div>
+              <div style={{ fontSize: "0.8rem", opacity: 0.6, marginTop: "0.2rem" }}>Your last reading is saved</div>
             </div>
-            <div className="form-group" style={{ position: 'relative', marginTop: '1rem' }}>
+            <button className="btn-resume" onClick={loadSavedSession}>Resume →</button>
+          </div>
+        )}
+
+        <div className="glass-panel" style={{ maxWidth: "480px", width: "100%" }}>
+          <form onSubmit={handleGenerateKundli} style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+            <h4 style={{ opacity: 0.7, textTransform: "uppercase", letterSpacing: "1.5px", fontSize: "0.75rem" }}>Birth Details</h4>
+
+            <div className="form-group">
+              <label>Full Name</label>
+              <input type="text" name="name" className="form-input" value={formData.name} onChange={e => setFormData(f => ({ ...f, name: e.target.value }))} required placeholder="e.g. Arjun Sharma" />
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+              <div className="form-group">
+                <label>Birth Date</label>
+                <input type="date" name="dateOfBirth" className="form-input" value={formData.dateOfBirth} onChange={e => setFormData(f => ({ ...f, dateOfBirth: e.target.value }))} required />
+              </div>
+              <div className="form-group">
+                <label>Birth Time</label>
+                <input type="time" name="timeOfBirth" className="form-input" value={formData.timeOfBirth} onChange={e => setFormData(f => ({ ...f, timeOfBirth: e.target.value }))} required />
+              </div>
+            </div>
+
+            <div className="form-group" style={{ position: "relative" }}>
               <label>Birth Location</label>
-              <input type="text" className="form-input" value={locSearch.query} onChange={(e) => handleLocationSearch(e.target.value)} placeholder="Search City..." autoComplete="off" required />
+              <input type="text" className="form-input" value={locSearch.query}
+                onChange={e => handleLocationSearch(e.target.value, false)}
+                placeholder="Search city…" autoComplete="off" required />
               {locSearch.show && (
                 <div className="dropdown-panel">
-                  {locSearch.results.map((loc: any, i) => (
-                    <div key={i} onClick={() => selectLocation(loc)} className="dropdown-item">{loc.display_name}</div>
+                  {locSearch.results.map((loc: any, i: number) => (
+                    <div key={i} className="dropdown-item" onClick={() => selectLocation(loc, false)}>
+                      {loc.display_name}
+                    </div>
                   ))}
                 </div>
               )}
             </div>
-          </div>
-          
-          <button type="submit" className="btn-primary" style={{ marginTop: '1rem' }} disabled={loading}>{loading ? 'Consulting Stars...' : 'Generate Reading'}</button>
-        </form>
-      </div>
-    </main>
+
+            {loading ? (
+              <AstroLoader msg="Aligning the stars..." />
+            ) : (
+              <button type="submit" className="btn-primary">
+                ✨ Generate My Kundli
+              </button>
+            )}
+          </form>
+        </div>
+      </main>
+    </>
   );
 }
